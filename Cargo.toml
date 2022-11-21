@@ -1,0 +1,21 @@
+[package]
+name = "manager_linux"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = "*"
+serde_json = "*"
+serde_derive = "*"
+serde_millis = "*"
+rmp = "*"
+rmp-serde = "*"
+
+sysinfo = "*"
+zstd = "*"
+tar = "*"
+ring = "*"
+chrono = "*"
+pbr = "1.0.4"
+bevy_ecs = "0.8.1"
+mio = "0.8.5"
