@@ -398,7 +398,7 @@ fn perform_poll(poll_res: Result<u8, u8>, api: Arc<Mutex<IntApi>>, mut config: P
 
 fn main() -> Result<(), Error> {
     if utils::mos::is_manager_already_run() {
-        return;
+        return Err(Error::other("manager already run"));
     }
 
     let mut world = World::default();
