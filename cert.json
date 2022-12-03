@@ -1,1 +1,18 @@
-{"host":"srv04.elpi-tech.ru","data_port":25010,"file_port":25011,"stream_port":25012,"id":1,"name":"test","firm_id":1,"firm_name":"test","pasw":"test"}
+{
+  "host": "srv04.elpi-tech.ru",
+  "data_port": 25010,
+  "file_port": 25011,
+  "stream_port": 25012,
+  "name": "test_123456",
+  "firm_id": 1,
+  "firm_name": "test",
+  "auth": {
+    "id": 1,
+    "token": [
+      255,
+      0,
+      255,
+      0
+    ]
+  }
+}

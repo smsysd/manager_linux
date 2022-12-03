@@ -1,38 +1,24 @@
 use std::io::{Read, Seek};
 use std::path::{PathBuf, Path};
 use std::process::{Command};
+use std::thread;
+use std::time::Duration;
 use std::{fs, io::Write};
 use std::fs::{File, OpenOptions};
 use ring::digest::{Context, SHA256};
 use rmp_serde as rmps;
+use std::io::Error;
 
 use zstd::Decoder;
 use tar::Archive;
 use sysinfo::{ProcessExt, System, SystemExt, Pid, PidExt};
 
-use crate::siapi::PointConfig;
-use crate::siapi::Program;
-use crate::siapi::ProgramConfig;
+use crate::data_types::data_server::{GetPointConfigAnsw as PointConfig, ProgramCustom};
+use crate::data_types::data_server::Program;
+use crate::data_types::Cert;
+use crate::data_types::data_server::ProgramHashes;
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Cert {
-	pub host: String,
-	pub data_port: u16,
-	pub file_port: u16,
-	pub stream_port: u16,
-    pub id: Option<u32>,
-    pub name: Option<String>,
-    pub firm_id: Option<u32>,
-    pub firm_name: Option<String>,
-    pub pasw: Option<String>
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash)]
-pub struct ProgramHashes {
-	pub id: u32,
-	pub build: Vec<u8>,
-	pub asset: Option<Vec<u8>>
-}
+use crate::utils::err;
 
 const DEFAULT_INDICATE_SH_PATH: &str = "./indicate.sh";
 const CERT_PATH: &str = "./cert.json";
@@ -44,99 +30,70 @@ const ARCH_TYPE: &str = "tar.zst";
 
 const HASH_CALC_BUFFER_SIZE: usize = 4096;
 
-fn unpack(arch: &str, to: &str) -> Result<(), String> {
-    let tar_zstd = match File::open(arch) {
-		Ok(f) => f,
-		_ => return Err(String::from("fail to open file"))
-	};
+fn unpack(arch: &str, to: &str) -> Result<(), Error> {
+    let tar_zstd = File::open(arch)?;
 
-    let tar = match Decoder::new(tar_zstd) {
-		Ok(s) => s,
-		_ => return Err(String::from("fail create zstd decoder stream"))
-	};
+    let tar = Decoder::new(tar_zstd)?;
     let mut archive = Archive::new(tar);
-    match archive.unpack(to) {
-		Err(_) => Err(String::from("fail unpack")),
-		_ => Ok(())
-	}
+    archive.unpack(to)?;
+	Ok(())
 }
 
-pub fn read_cert() -> Result<Cert, String> {
-	let data = fs::read(CERT_PATH).unwrap();
+pub fn read_cert() -> Result<Cert, Error> {
+	let data = fs::read(CERT_PATH)?;
 	match serde_json::from_slice::<Cert>(&data[..]) {
-		Err(e) => Err(e.to_string()),
+		Err(e) => Err(err(&e.to_string())),
 		Ok(cert) => Ok(cert)
 	}
 }
 
-pub fn write_cert(cert: &Cert) -> Result<(), String> {
-	println!("\tWRITE CERT..");
+pub fn write_cert(cert: &Cert) -> Result<(), Error> {
 	let res = serde_json::to_vec_pretty(cert);
 	match res {
 		Ok(data) => {
-			match fs::write(CERT_PATH, data) {
-				Ok(()) => Ok(()),
-				Err(e) => Err(e.to_string())
-			}
+			fs::write(CERT_PATH, data)?;
+			Ok(())
 		},
-		Err(e) => Err(e.to_string())
+		Err(e) => Err(err(&e.to_string()))
 	}
 }
 
-pub fn read_config() -> Result<PointConfig, String> {
-	match fs::read(CONFIG_PATH) {
-		Ok(data) => {
-			match serde_json::from_slice::<PointConfig>(&data[..]) {
-				Ok(config) => Ok(config),
-				Err(e) => Err(e.to_string())
-			}
-		},
-		Err(e) => Err(e.to_string())
+pub fn read_config() -> Result<PointConfig, Error> {
+	let data = fs::read(CONFIG_PATH)?;
+	match serde_json::from_slice::<PointConfig>(&data[..]) {
+		Ok(config) => Ok(config),
+		Err(e) => Err(err(&e.to_string()))
 	}
 }
 
-pub fn write_config(config: &PointConfig) -> Result<(), String> {
-	println!("\tWRITE CONFIG..");
-	let res = serde_json::to_vec_pretty(config);
-	match res {
+pub fn write_config(config: &PointConfig) -> Result<(), Error> {
+	match serde_json::to_vec_pretty(config) {
 		Ok(data) => {
-			match fs::write(CONFIG_PATH, data) {
-				Ok(()) => Ok(()),
-				Err(e) => Err(e.to_string())
-			}
+			fs::write(CONFIG_PATH, data)?;
+			Ok(())
 		},
-		Err(e) => Err(e.to_string())
+		Err(e) => Err(err(&e.to_string()))
 	}
 }
 
 pub fn read_programs_hashes() -> Vec<ProgramHashes> {
 	let data = match fs::read(HASHES_PATH) {
 		Ok(data) => data,
-		Err(e) => {
-			println!("[MOS] fail to read file with program hashes: {} make empty vec", e.to_string());
-			return Vec::new();
-		}
+		Err(_) => return Vec::new()
 	};
 	match rmps::decode::from_slice(&data) {
 		Ok(data) => data,
-		Err(e) => {
-			println!("[MOS] fail to read programs hashes: {}", e.to_string());
-			Vec::new()
-		}
+		Err(_) => Vec::new()
 	}
 }
 
-pub fn write_programs_hashes(hashes: &Vec<ProgramHashes>) -> Result<(), String> {
-	println!("\tWRITE HASHES..");
-	let res = rmps::encode::to_vec(hashes);
-	match res {
+pub fn write_programs_hashes(hashes: &Vec<ProgramHashes>) -> Result<(), Error> {
+	match rmps::encode::to_vec(hashes) {
 		Ok(data) => {
-			match fs::write(HASHES_PATH, data) {
-				Ok(()) => Ok(()),
-				Err(e) => Err(e.to_string())
-			}
+			fs::write(HASHES_PATH, data)?;
+			Ok(())
 		},
-		Err(e) => Err(e.to_string())
+		Err(e) => Err(err(&e.to_string()))
 	}
 }
 
@@ -150,11 +107,7 @@ pub fn is_manager_already_run() -> bool {
 	}
 	println!("proc name: {}", self_name);
 	sys.refresh_all();
-	if sys.processes_by_name(self_name).count() > 1 {
-		true
-	} else {
-		false
-	}
+	sys.processes_by_name(self_name).count() > 1
 }
 
 pub fn get_hostname() -> String {
@@ -191,7 +144,17 @@ pub fn get_bin_programs(bin_path: &str) -> Vec<String> {
 	dirs
 }
 
-pub fn is_program_run(pid: u32) -> bool {
+pub fn is_run_by_name(name: &str) -> bool {
+	let mut sys = System::new_all();
+	let mut name = String::from(name);
+	if name.len() > 16 {
+		name = String::from(&name[0..16]);
+	}
+	sys.refresh_all();
+	sys.processes_by_name(&name).count() > 1
+}
+
+pub fn is_run_by_pid(pid: u32) -> bool {
 	let mut sys = System::new_all();
 	sys.refresh_all();
 	match sys.process(Pid::from_u32(pid)) {
@@ -202,7 +165,7 @@ pub fn is_program_run(pid: u32) -> bool {
 	}
 }
 
-pub fn pkill_program(program_name: &str) {
+pub fn pkill(program_name: &str) {
 	let name = if program_name.len() > 16 {
 		&program_name[..16]
 	} else {
@@ -216,7 +179,7 @@ pub fn pkill_program(program_name: &str) {
 	}
 }
 
-pub fn kill_program(pid: u32) {
+pub fn kill(pid: u32) {
 	let mut sys = System::new_all();
 	sys.refresh_all();
 	match sys.process(Pid::from_u32(pid)) {
@@ -235,7 +198,7 @@ pub fn format_entry_path(program_name: &str, entry: &str, bin_path: &str) -> Str
 	format!("{}/{}", format_program_path(program_name, bin_path), entry)
 }
 
-pub fn get_entry_dir(program_name: &str, entry: &str, bin_path: &str) -> PathBuf {
+pub fn format_entry_dir(program_name: &str, entry: &str, bin_path: &str) -> PathBuf {
 	let full = PathBuf::from(format_entry_path(program_name, entry, bin_path));
 	PathBuf::from(full.parent().unwrap())
 }
@@ -244,29 +207,26 @@ pub fn format_temp_arch_path(arch_name: &str) -> String {
 	format!("{}/{}.{}", TEMP_ARCH_PATH, arch_name, ARCH_TYPE)
 }
 
-pub fn remove_program(program_name: &str, bin_path: &str) {
+pub fn remove_program(program_name: &str, bin_path: &str) -> Result<(), Error> {
 	let dir_path = format_program_path(program_name, bin_path);
-	match fs::remove_dir_all(dir_path) {
-		_ => ()
-	}
+	fs::remove_dir_all(dir_path)?;
+	Ok(())
 }
 
-pub fn remove_asset(program_name: &str, bin_path: &str) {
+pub fn remove_asset(program_name: &str, bin_path: &str) -> Result<(), Error> {
 	let dir_path = format!("{}/asset", format_program_path(program_name, bin_path));
-	match fs::remove_dir_all(dir_path) {
-		_ => ()
-	}
+	fs::remove_dir_all(dir_path)?;
+	Ok(())
 }
 
-pub fn remove_config(program_name: &str, path: &str, bin_path: &str) {
+pub fn remove_config(program_name: &str, path: &str, bin_path: &str) -> Result<(), Error> {
 	let file_path = format!("{}/{}", format_program_path(program_name, bin_path), path);
-	match fs::remove_file(file_path) {
-		_ => ()
-	}
+	fs::remove_file(file_path)?;
+	Ok(())
 }
 
-pub fn setup_program(program: &Program, temp_arch: &str, bin_path: &str, entry: Option<String>) -> Result<(), String> {
-	let program_spath = format_program_path(&program.name, bin_path);
+pub fn setup_program(program: &ProgramCustom, name: &str, temp_arch: &str, bin_path: &str) -> Result<(), Error> {
+	let program_spath = format_program_path(name, bin_path);
 	let program_temp_spath = format!("{}.temp", program_spath);
 	let program_path = Path::new(&program_spath);
 	let program_temp_path = Path::new(&program_temp_spath);
@@ -275,23 +235,17 @@ pub fn setup_program(program: &Program, temp_arch: &str, bin_path: &str, entry: 
 	let path_pairs = if program_path.exists() {
 		// if temp dir already exists - delete
 		if program_temp_path.exists() {
-			match fs::remove_dir_all(&program_temp_path) {
-				Err(e) => return Err(format!("fail delete temp dir: {}", e.to_string())),
-				_ => ()
-			}
+			fs::remove_dir_all(&program_temp_path)?;
 		}
 		// create clear temp dir
-		match fs::create_dir_all(&program_temp_path) {
-			Err(e) => return Err(format!("fail create temp dir: {}", e.to_string())),
-			_ => ()
-		}
+		fs::create_dir_all(&program_temp_path)?;
 
 		// create orig paths and temp paths of exists configs and asset dir
 		let mut configs_path_pairs = Vec::<(PathBuf, PathBuf)>::new();
 		for csp in &program.configs {
-			let full_spath = format!("{}/{}", program_spath, csp.path);
+			let full_spath = format!("{}/{}", program_spath, csp.1);
 			let path = PathBuf::from(&full_spath);
-			let full_temp_spath = format!("{}/{}", program_temp_spath, csp.path);
+			let full_temp_spath = format!("{}/{}", program_temp_spath, csp.1);
 			let temp_path = PathBuf::from(&full_temp_spath);
 			if path.exists() {
 				configs_path_pairs.push((path, temp_path));
@@ -304,26 +258,15 @@ pub fn setup_program(program: &Program, temp_arch: &str, bin_path: &str, entry: 
 		let asset_temp_spath = format!("{}/asset", program_temp_spath);
 		let asset_temp_path = PathBuf::from(&asset_temp_spath);
 		if asset_path.exists() {
-			match fs::rename(&asset_path, &asset_temp_path) {
-				Err(e) => return Err(format!("fail move asset to temp dir: {}", e.to_string())),
-				_ => ()
-			}
+			fs::rename(&asset_path, &asset_temp_path)?;
 		}
 		for cp in &configs_path_pairs {
 			// create path
 			match cp.1.parent() {
-				Some(parent) => {
-					match fs::create_dir_all(parent) {
-						Err(e) => return Err(format!("fail create path for config in temp: {}", e.to_string())),
-						_ => ()
-					}
-				},
+				Some(parent) => fs::create_dir_all(parent)?,
 				None => ()
 			}
-			match fs::rename(&cp.0, &cp.1) {
-				Err(e) => return Err(format!("fail move config to temp: {}", e.to_string())),
-				_ => ()
-			}
+			fs::rename(&cp.0, &cp.1)?;
 		}
 
 		Some((configs_path_pairs, asset_path, asset_temp_path))
@@ -333,45 +276,27 @@ pub fn setup_program(program: &Program, temp_arch: &str, bin_path: &str, entry: 
 
 	// perform clear setup - delete current dir, create empty dir and unpack arch into
 	if program_path.exists() {
-		match fs::remove_dir_all(program_path) {
-			Err(e) => return Err(format!("fail remove current program dir: {}", e.to_string())),
-			_ => ()
-		}
+		fs::remove_dir_all(program_path)?;
 	}
-	match fs::create_dir_all(program_path) {
-		Err(e) => return Err(format!("fail create new clear program dir: {}", e.to_string())),
-		_ => ()
-	}
+	fs::create_dir_all(program_path)?;
 	let arch_path = format_temp_arch_path(temp_arch);
-	match unpack(&arch_path, &program_spath) {
-		Err(e) => return Err(format!("fail to unpack: {}", e)),
-		_ => ()
-	}
+	unpack(&arch_path, &program_spath)?;
 
 	// if old dir was exists - return copied files with full paths to program dir
 	match path_pairs {
 		Some(paths) => {
 			// move asset
 			if paths.2.exists() {
-				match fs::rename(&paths.2, &paths.1) {
-					Err(e) => return Err(format!("fail move asset from temp to new program dir: {}", e.to_string())),
-					_ => ()
-				}
+				fs::rename(&paths.2, &paths.1)?;
 			}
 			for cp in paths.0 {
 				match cp.0.parent() {
 					Some(parent) => {
-						match fs::create_dir_all(parent) {
-							Err(e) => return Err(format!("fail create config path in new program dir: {}", e.to_string())),
-							_ => ()
-						}
+						fs::create_dir_all(parent)?;
 					},
 					None => ()
 				}
-				match fs::rename(&cp.1, &cp.0) {
-					Err(e) => return Err(format!("fail to move old config ({:?}) to new program dir ({:?}): {}", cp.1, cp.0, e.to_string())),
-					_ => ()
-				}
+				fs::rename(&cp.1, &cp.0)?;
 			}
 		},
 		None => ()
@@ -379,33 +304,17 @@ pub fn setup_program(program: &Program, temp_arch: &str, bin_path: &str, entry: 
 
 	// delete temp dir
 	if program_temp_path.exists() {
-		match fs::remove_dir_all(&program_temp_path) {
-			_ => ()
-		}
+		fs::remove_dir_all(&program_temp_path)?;
 	}
-	
-	match entry {
-		Some(entry) => {
-			let entry_path = format_entry_path(&program.name, &entry, bin_path);
-			if !entry_exists(program, bin_path) {
-				return Err(format!("program setup success, but entry in program dir not found: {}\n\tbuild on server may be corrupted", entry_path));
-			}
-		},
-		None => ()
-	}
+
 	Ok(())
 }
 
-pub fn setup_asset(program: &Program, temp_arch: &str, bin_path: &str) -> Result<(), String> {
+pub fn setup_asset(name: &str, temp_arch: &str, bin_path: &str) -> Result<(), Error> {
 	let arch_path = format_temp_arch_path(temp_arch);
-	let asset_path = format!("{}/asset", format_program_path(&program.name, bin_path));
-	match fs::remove_dir_all(&asset_path) {
-		_ => ()
-	}
-	match fs::create_dir_all(&asset_path) {
-		Ok(()) => (),
-		Err(e) => return Err(format!("fail to create asset dir: {}", e.to_string()))
-	}
+	let asset_path = format!("{}/asset", format_program_path(name, bin_path));
+	fs::remove_dir_all(&asset_path)?;
+	fs::create_dir_all(&asset_path)?;
 	unpack(&arch_path, &asset_path)
 }
 
@@ -414,40 +323,25 @@ pub fn is_asset_exists(program: &Program, bin_path: &str) -> bool {
 	Path::new(&dir_path).exists()
 }
 
-pub fn setup_config(program: &Program, config: &ProgramConfig, data: Vec<u8>, bin_path: &str) -> Result<(), String> {
-	let full_spath = format!("{}/{}", format_program_path(&program.name, bin_path), config.path);
+pub fn setup_config(name: &str, config_path: &str, data: &Vec<u8>, bin_path: &str) -> Result<(), Error> {
+	let full_spath = format!("{}/{}", format_program_path(name, bin_path), config_path);
 	let full_path = Path::new(&full_spath);
 	match full_path.parent() {
-		Some(parent) => {
-			match fs::create_dir_all(parent) {
-				Err(e) => return Err(e.to_string()),
-				_ => ()
-			}
-		},
+		Some(parent) => fs::create_dir_all(parent)?,
 		None => ()
 	}
 	let mut opt = fs::OpenOptions::new();
 	opt.write(true);
 	opt.create(true);
 	opt.truncate(true);
-	let mut file = match opt.open(&full_path) {
-		Ok(f) => f,
-		_ => return Err(String::from("failt to open file"))
-	};
-
-	match file.write_all(&data[..]) {
-		Ok(_) => Ok(()),
-		Err(e) => Err(format!("fail write to file: {}", e.to_string()))
-	}
+	let mut file = opt.open(&full_path)?;
+	file.write_all(&data[..])
 }
 
-pub fn create_temp_arch(name: &str) -> Result<File, String> {
+pub fn create_temp_arch(name: &str) -> Result<File, Error> {
 	let parent_path = PathBuf::from(TEMP_ARCH_PATH);
 	if !parent_path.exists() {
-		match fs::create_dir_all(parent_path) {
-			Err(e) => return Err(e.to_string()),
-			_ => ()
-		}
+		fs::create_dir_all(parent_path)?;
 	}
 	let mut opt = OpenOptions::new();
 	opt.write(true);
@@ -455,32 +349,27 @@ pub fn create_temp_arch(name: &str) -> Result<File, String> {
 	opt.create(true);
 	opt.append(false);
 	opt.truncate(true);
-	match opt.open(format_temp_arch_path(name)) {
-		Ok(f) => Ok(f),
-		Err(e) => Err(e.to_string())
-	}
+	opt.open(format_temp_arch_path(name))
 }
 
-pub fn temp_send_data_push(id: i64, data: &Vec<u8>) {
+pub fn temp_send_data_push(id: i64, data: &Vec<u8>) -> Result<(), Error> {
 	let file_path = format!("{}/{}", TEMP_SEND_DATA_PATH, id);
 	let mut opt = OpenOptions::new();
 	opt.write(true);
 	opt.create(true);
 	opt.truncate(true);
 	if !Path::new(TEMP_SEND_DATA_PATH).exists() {
-		fs::create_dir(TEMP_SEND_DATA_PATH).unwrap();
+		fs::create_dir(TEMP_SEND_DATA_PATH)?;
 	}
-	let mut file = opt.open(&file_path).unwrap();
-	file.write_all(&data).unwrap();
+	let mut file = opt.open(&file_path)?;
+	file.write_all(&data)?;
 	std::thread::sleep(std::time::Duration::from_millis(2));
+	Ok(())
 }
 
-pub fn temp_send_data_pop() -> Option<(i64,Vec<u8>)> {
+pub fn temp_send_data_pop() -> Result<Option<(i64,Vec<u8>)>, Error> {
 	let mut files = Vec::<(PathBuf, i64)>::new();
-	let entries = match fs::read_dir(TEMP_SEND_DATA_PATH) {
-		Ok(res) => res,
-		_ => return None
-	};
+	let entries = fs::read_dir(TEMP_SEND_DATA_PATH)?;
 
 	for entry in entries {
 		match entry {
@@ -516,14 +405,14 @@ pub fn temp_send_data_pop() -> Option<(i64,Vec<u8>)> {
 				min_val = files[i].1;
 			}
 		}
-		let mut file = File::open(&files[min_id_i].0).unwrap();
+		let mut file = File::open(&files[min_id_i].0)?;
 		let mut buf = Vec::<u8>::new();
-		file.read_to_end(&mut buf).unwrap();
+		file.read_to_end(&mut buf)?;
 		drop(file);
-		fs::remove_file(&files[min_id_i].0).unwrap();
-		Some((min_val, buf))
+		fs::remove_file(&files[min_id_i].0)?;
+		Ok(Some((min_val, buf)))
 	} else {
-		None
+		Ok(None)
 	}
 }
 
@@ -533,30 +422,30 @@ pub fn hash_vec(data: &Vec<u8>) -> Vec<u8> {
 	context.finish().as_ref().to_vec()
 }
 
-pub fn hash_file(file: &mut File) -> Vec<u8> {
+pub fn hash_file(file: &mut File) -> Result<Vec<u8>, Error> {
 	let mut context = Context::new(&SHA256);
 	let mut buf: [u8;HASH_CALC_BUFFER_SIZE] = [0;HASH_CALC_BUFFER_SIZE];
-	file.rewind().unwrap();
+	file.rewind()?;
 	loop {
-		let len = file.read(&mut buf).unwrap();
+		let len = file.read(&mut buf)?;
 		if len == 0 {
 			break;
 		} else {
 			context.update(&buf[..len]);
 		}
 	}
-	context.finish().as_ref().to_vec()
+	Ok(context.finish().as_ref().to_vec())
 }
 
 pub fn config_hash(program_name: &str, config: &str, bin_path: &str) -> Vec<u8> {
 	let full_spath = format!("{}/{}", format_program_path(program_name, bin_path), config);
 	let full_path = Path::new(&full_spath);
 	match File::open(full_path) {
-		Ok(mut f) => hash_file(&mut f),
-		Err(_) => {
-			// println!("[MOS][CONFIG_HASH] fail to open config file by path {} : {}", full_spath, e.to_string());
-			Vec::new()
-		}
+		Ok(mut f) => match hash_file(&mut f) {
+			Ok(hash) => hash,
+			Err(_) => Vec::new()
+		},
+		Err(_) => Vec::new()
 	}
 }
 
@@ -569,22 +458,21 @@ pub fn entry_exists(program: &Program, bin_path: &str) -> bool {
 	path.is_file()
 }
 
-pub fn indicate() -> Result<(), String> {
+pub fn indicate() {
 	let path = Path::new(DEFAULT_INDICATE_SH_PATH);
 	if path.exists() {
 		let mut cmd = Command::new("sh");
 		cmd.arg("indicate.sh");
 		match cmd.status() {
-			Ok(rc) => {
-				if rc.success() {
-					Ok(())
-				} else {
-					Err(rc.to_string())
-				}
-			},
-			Err(e) => Err(e.to_string())
+			_ => ()
 		}
-	} else {
-		Err(format!("default indicate not implemented"))
 	}
+}
+
+pub fn reboot() -> Result<(), Error> {
+    let mut cmd = Command::new("sudo");
+    cmd.arg("reboot");
+    cmd.status()?;
+    thread::sleep(Duration::from_secs(10));
+	Ok(())
 }

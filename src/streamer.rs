@@ -1,343 +1,141 @@
-use std::io::{Read, Write, ErrorKind};
-use std::net::TcpStream;
-use std::process::{ChildStdout, ChildStdin};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::mpsc::{Sender, Receiver, TryRecvError, channel};
-use std::thread;
-use std::thread::JoinHandle;
-use std::time::Duration;
+/// Stream manager, handle corresponding PollEvent(StreamReq) - 
+/// get stream from Exec, connect Exec stream with server stream, 
+/// perform transfer data for Stream.
 
-use crate::exec;
-use crate::siapi;
-use siapi::IntApi;
-use exec::Exec;
+use bevy_ecs::prelude::*;
+use std::{io::{Error, Write, Read, ErrorKind}, net::TcpStream, sync::mpsc::TryRecvError};
 
-const STREAM_TRANSFER_DELAY: Duration = Duration::from_millis(10);
-const STREAM_BUF_SIZE: usize = 4096;
+use crate::{stages, events, execm::{Exec, self}, data_types::{Cert, self}, utils::rmp_encode};
 
+const BUFSIZE: usize = 1024;
+
+#[derive(Component)]
 pub struct Stream {
-    pub program_id: u32,
-    stdout: Receiver<Vec<u8>>,
-    stdin: Option<Sender<Vec<u8>>>,
-    stdout_handle: JoinHandle<()>,
+	pub stream_id: i32,
+	pub program_id: i32,
+	pub tcp: TcpStream
 }
 
-struct RemoteHandler {
-    pub program_id: u32,
-    handle: JoinHandle<Stream>
+#[derive(Component)]
+pub struct StreamStateRun;
+
+#[derive(Component)]
+pub struct StreamStateTransfer;
+
+fn terminator(mut cmd: Commands, execs: Query<(Entity, &Stream), (With<StreamStateTransfer>, Without<execm::Run>)>) {
+	for (e, s) in &execs {
+		cmd.entity(e).remove::<Stream>();
+		cmd.entity(e).remove::<StreamStateTransfer>();
+		println!("[STREAMER] stream({}) for {} transfer terminated because program not run", s.stream_id, s.program_id);
+	}
 }
 
-fn just_msg(tcp: &mut TcpStream, msg: &str) {
-    print!("[STREAMER][MSG] {}", msg);
-    match tcp.write_all(msg.as_bytes()) {
-        _ => ()
-    }
+fn transfer(mut cmd: Commands, mut execs: Query<(Entity, &Exec, &mut execm::Run, &mut Stream), With<StreamStateTransfer>>) {
+	let mut buf: [u8;BUFSIZE] = [0;BUFSIZE];
+	for (ex_e, _ex, mut run, mut s) in &mut execs {
+		let mut disonnect = false;
+		match &mut run.stdout {
+			Some(stdout) => {
+				match stdout.lock().unwrap().try_recv() {
+					Ok(data) => {
+						match s.tcp.write_all(&data) {
+							Err(ref e) if e.kind() == ErrorKind::WouldBlock => (),
+							Err(_) => disonnect = true,
+							_ => ()
+						}
+					},
+					Err(TryRecvError::Disconnected) => disonnect = true,
+					_ => ()
+				}
+			},
+			None => disonnect = true
+		}
+		match s.tcp.read(&mut buf) {
+			Ok(0) => disonnect = true,
+			Ok(len) => {
+				match &mut run.child.stdin {
+					Some(stdin) => match stdin.write_all(&buf[..len]) {
+						_ => ()
+					},
+					None => ()
+				}
+			},
+			Err(ref e) if e.kind() == ErrorKind::WouldBlock => (),
+			Err(_) => disonnect = true,
+		}
+		if disonnect {
+			cmd.entity(ex_e).remove::<Stream>();
+			cmd.entity(ex_e).remove::<StreamStateTransfer>();
+			println!("[STREAMER] stream transfer terminated because program terminated or master cause");
+		}
+	}
 }
 
-fn remote_handler(mut stream: Stream, mut tcp: TcpStream) -> Stream {
-    let mut is_stdin = stream.stdin.is_some();
-    let mut buf: [u8; STREAM_BUF_SIZE] = [0;STREAM_BUF_SIZE];
-    tcp.set_read_timeout(Some(STREAM_TRANSFER_DELAY)).unwrap();
-    loop {
-        match stream.stdout.try_recv() {
-            Ok(data) => {
-                match tcp.write_all(&data) {
-                    Err(_) => {
-                        println!("[STREAMER][REMOTE_H] tcp disconnected, break loop..");
-                        break;
-                    },
-                    _ => ()
-                }
-            },
-            Err(TryRecvError::Empty) => (),
-            _ => {
-                println!("[STREAMER][REMOTE_H] stdout disconnected, break loop..");
-                break;
-            }
-        }
-        if is_stdin {
-            match tcp.read(&mut buf) {
-                Ok(len) => {
-                    if len == 0 {
-                        println!("[STREAMER][REMOTE_H] tcp disconnected, break loop..");
-                        break;                        
-                    }
-                    match stream.stdin.take() {
-                        Some(stdin) => {
-                            match stdin.send(buf[..len].to_vec()) {
-                                Err(_) => {
-                                    println!("[STREAMER][REMOTE_H] stdin disconnected, continue without it..");
-                                    is_stdin = false;
-                                },
-                                _ => stream.stdin = Some(stdin)
-                            }
-                        },
-                        None => ()
-                    }
-                },
-                Err(ref e) if e.kind() == ErrorKind::TimedOut => (),
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => (),
-                Err(_) => {
-                    println!("[STREAMER][REMOTE_H] tcp disconnected, break loop..");
-                    break;
-                }
-            }
-        }
-    }
-    stream
+fn runner(mut cmd: Commands, mut evw: EventWriter<events::RunRequest>, execs: Query<(Entity, &Exec, Option<&execm::Run>), With<StreamStateRun>>) {
+	for (ex_e, ex, run) in &execs {
+		match run {
+			Some(_) => {
+				cmd.entity(ex_e).remove::<StreamStateRun>();
+				cmd.entity(ex_e).insert(StreamStateTransfer);
+			},
+			None => {
+				evw.send(events::RunRequest(ex.pid));
+			}
+		}
+	}
 }
 
-fn stdin_handler(rx: Receiver<Vec<u8>>, mut stdin: ChildStdin) {
-    loop {
-        match rx.recv() {
-            Ok(data) => {
-                match stdin.write_all(&data) {
-                    Err(e) => {
-                        println!("[STREAMER][STDIN_H] fail to write data: {}\n\tbreak loop..", e.to_string());
-                        break;
-                    },
-                    _ => ()
-                }
-            },
-            Err(e) => {
-                println!("[STREAMER][STDIN_H] fail to receive data: {}\n\tbreak loop..", e.to_string());
-                break;
-            }
-        }
-    }
+fn adder(
+	mut cmd: Commands,
+	mut evr: EventReader<events::Stream>,
+	execs: Query<(Entity, &Exec), Without<Stream>>,
+	cert: Res<Cert>
+) {
+	if !evr.is_empty() {
+		let ev = evr.iter().next().unwrap();
+		for (ex_e, ex) in &execs {
+			if ex.pid == ev.program_id {
+				let tcp = match connect(ev.id, &cert.host, cert.stream_port) {
+					Ok(tcp) => tcp,
+					Err(e) => {
+						println!("[STREAMER] fail to connect: {:?}", e);
+						return;
+					}
+				};
+				tcp.set_nonblocking(true).unwrap();
+				
+				cmd.entity(ex_e).insert((
+					Stream {
+						stream_id: ev.id,
+						program_id: ev.program_id,
+						tcp: tcp,
+
+					},
+					StreamStateRun
+				));
+				println!("[STREAMER] new stream({}) for {}", ev.id, ev.program_id);
+				break;
+			}
+		}
+	}
 }
 
-fn stdout_handler(tx: Sender<Vec<u8>>, mut stdout: ChildStdout) {
-    let mut buf:[u8;STREAM_BUF_SIZE] = [0;STREAM_BUF_SIZE];
-    loop {
-        match stdout.read(&mut buf) {
-            Ok(len) => {
-                if len == 0 {
-                    println!("[STREAMER][STDOUT_H] fail to read data: zero len\n\tbreak loop..");
-                    break;                    
-                }
-                match tx.send(buf[..len].to_vec()) {
-                    Err(e) => {
-                        println!("[STREAMER][STDOUT_H] fail to send data: {}\n\tbreak loop..", e.to_string());
-                        break;
-                    },
-                    _ => ()
-                }
-            },
-            Err(e) => {
-                println!("[STREAMER][STDOUT_H] fail to read data: {}\n\tbreak loop..", e.to_string());
-                break;
-            }
-        }
-    }
+fn connect(id: i32, host: &str, port: u16) -> Result<TcpStream, Error> {
+	let mut tcp = std::net::TcpStream::connect(format!("{}:{}", host, port))?;
+	let req_raw = rmp_encode(&data_types::stream_api::Request {id: id, initiator: false})?;
+	tcp.write_all(&req_raw)?;
+	Ok(tcp)
 }
 
-fn extract_stream(exec: &Arc<Mutex<Exec>>) -> Option<Stream> {
-    let mut exec_unmux = exec.lock().unwrap();
-    match exec_unmux.proc.take() {
-        Some(mut child) => {
-            let stdout: (Receiver<Vec<u8>>, JoinHandle<()>) = match child.stdout.take() {
-                Some(stdout) => {
-                    let (tx, rx) = channel();
-                    let handle = thread::spawn(|| stdout_handler(tx, stdout));
-                    (rx, handle)
-                },
-                None => return None
-            };
-            let stdin: Option<Sender<Vec<u8>>> = match child.stdin.take() {
-                Some(stdin) => {
-                    let (tx, rx) = channel();
-                    thread::spawn(|| stdin_handler(rx, stdin));
-                    Some(tx)
-                },
-                None => None
-            };
-            exec_unmux.proc = Some(child);
-            Some(Stream {program_id: exec_unmux.program_id, stdout: stdout.0, stdin: stdin, stdout_handle: stdout.1})
-        },
-        None => None
-    }
+fn setup(mut _cmd: Commands) {
+
 }
 
-pub struct Streamer {
-    streams: Arc<Mutex<Vec<Stream>>>,
-    rhandlers: Arc<Mutex<Vec<RemoteHandler>>>
-}
-
-impl Streamer {
-    pub fn new() -> Self {
-        Self {
-            streams: Arc::new(Mutex::new(Vec::new())),
-            rhandlers: Arc::new(Mutex::new(Vec::new()))
-        }
-    }
-
-    pub fn get_and_begin_stream(&mut self, execs: &Vec<Arc<Mutex<Exec>>>, api: Arc<Mutex<IntApi>>, bin_path: &str) {
-        let api_res = api.lock().unwrap().get_stream();
-        match api_res {
-            Ok((answ, mut tcp)) => {
-                let stream = match self.find_stream(answ.point_program_id) {
-                    Some(stream) => stream,
-                    None => {
-                        match exec::exec_find(&execs, answ.point_program_id) {
-                            Some(ex) => {
-                                let is_run = ex.lock().unwrap().is_run();
-                                if is_run {
-                                    if self.rhandler_exists(answ.point_program_id) {
-                                        just_msg(&mut tcp, "EXEC STREAM ALREADY USED\n");
-                                    } else {
-                                        just_msg(&mut tcp, "INTERNAL: EXEC STREAM BROKEN\n");
-                                    }
-                                    return;
-                                } else {
-                                    just_msg(&mut tcp, "STARTING PROGRAM..\n");
-                                    match exec::start_program(ex.clone(), api, None, bin_path) {
-                                        Err(e) => {
-                                            let msg = format!("fail to start program: {}\n", e);
-                                            just_msg(&mut tcp, &msg);
-                                            return;
-                                        },
-                                        _ => {
-                                            match extract_stream(&ex) {
-                                                Some(stream) => stream,
-                                                None => {
-                                                    just_msg(&mut tcp, "INTERNAL: fail to get stdio from started exec\n");
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            None => {
-                                just_msg(&mut tcp, "EXEC NOT FOUND\n");
-                                return;
-                            }
-                        }
-                    }
-                };
-                let pid = stream.program_id;
-                let rhandle = thread::spawn(|| remote_handler(stream, tcp));
-                self.rhandlers.lock().unwrap().push(RemoteHandler {program_id: pid, handle: rhandle});
-            },
-            Err(e) => {
-                println!("fail get stream from server: {}", siapi::get_rc_name(e))
-            }
-        }
-    }
-
-    pub fn last_words(&mut self, program_id: u32) -> String {
-        String::new()
-    }
-
-    pub fn update_streams(&mut self, execs: &Vec<Arc<Mutex<Exec>>>) {
-        // extarct streams from run execs, and delete if not is run
-        for ex in execs {
-            let mut ex_unmux = ex.lock().unwrap();
-            let id = ex_unmux.program_id;
-            if ex_unmux.is_run() {
-                if !self.stream_exists(id) && !self.rhandler_exists(id) {
-                    let name = ex_unmux.name.clone();
-                    drop(ex_unmux);
-                    match extract_stream(ex) {
-                        Some(s) => {
-                            self.streams.lock().unwrap().push(s);
-                            println!("[STREAMER] add stream for {}", name);
-                        },
-                        None => {
-                            println!("[STREAMER] fail add stream for {}: exec is run, but stdio is None", name);
-                        }
-                    }
-                }
-            } else {
-                self.remove_wstream(id);
-            }
-        }
-
-        // return ended remote handlers streams to waiting streams
-        loop {
-            match self.move_rh_stream() {
-                Some(id) => println!("[STREAMER] move stream from remote_handler to waiting stream for program {}", id),
-                None => break
-            }
-        }
-
-        // check broken streams and delete its, stream broken if stdout_handle was finished
-        loop {
-            match self.remove_broken_stream() {
-                Some(id) => println!("[STREAMER] remove broken stream with pid {}", id),
-                None => break
-            }
-        }
-    }
-
-    fn remove_broken_stream(&mut self) -> Option<u32> {
-        let mut streams_unmux = self.streams.lock().unwrap();
-        for i in 0..streams_unmux.len() {
-            if streams_unmux[i].stdout_handle.is_finished() {
-                let id = streams_unmux[i].program_id;
-                streams_unmux.remove(i);
-                return Some(id);
-            }
-        }
-        None
-    }
-
-    fn move_rh_stream(&mut self) -> Option<u32> {
-        let mut streams_unmux = self.streams.lock().unwrap();
-        let mut rhandlers_unmux = self.rhandlers.lock().unwrap();
-        for i in 0..rhandlers_unmux.len() {
-            if rhandlers_unmux[i].handle.is_finished() {
-                let rh = rhandlers_unmux.remove(i);
-                let stream = rh.handle.join().unwrap();
-                let id = stream.program_id;
-                streams_unmux.push(stream);
-                return Some(id);
-            }
-        }
-        None
-    }
-
-    fn remove_wstream(&mut self, program_id: u32) {
-        let mut streams_unmux = self.streams.lock().unwrap();
-        for i in 0..streams_unmux.len() {
-            if streams_unmux[i].program_id == program_id {
-                streams_unmux.remove(i);
-                println!("[STREAMER] stream with pid {} removed", program_id);
-                return;
-            }
-        }
-    }
-
-    fn rhandler_exists(&self, program_id: u32) -> bool {
-        let rhandlers_unmux = self.rhandlers.lock().unwrap();
-        for rh in &*rhandlers_unmux {
-            if rh.program_id == program_id {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn stream_exists(&self, program_id: u32) -> bool {
-        let streams_unmux = self.streams.lock().unwrap();
-        for i in 0..streams_unmux.len() {
-            if streams_unmux[i].program_id == program_id {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn find_stream(&mut self, program_id: u32) -> Option<Stream> {
-        let mut streams_unmux = self.streams.lock().unwrap();
-        for i in 0..streams_unmux.len() {
-            if streams_unmux[i].program_id == program_id {
-                return Some(streams_unmux.remove(i));
-            }
-        }
-        None
-    }
+pub fn init(_world: &mut World, schedule: &mut Schedule) -> Result<(), Error> {
+	schedule.add_system_to_stage(stages::Startup::InitStreamer, setup);
+	schedule.add_system_to_stage(stages::Core::HandlePollEvents, adder);
+	schedule.add_system_to_stage(stages::Core::Main, runner);
+	schedule.add_system_to_stage(stages::Core::Main, transfer);
+	schedule.add_system_to_stage(stages::Core::Main, terminator);
+	Ok(())
 }

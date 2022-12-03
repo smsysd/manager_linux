@@ -1,46 +1,65 @@
 {
-  "poll_period": 30,
-  "indicate_program_id": null,
-  "startup_wait_ipc": 10,
-  "startup_wait_ipc_timeout": 30,
+  "poll_period": 30000,
   "bin_path": "/home/elpi/opt/manager_bin",
   "ipc_dir": "/home/elpi/run",
   "programs": [
     {
       "id": 1,
       "name": "test",
-      "ptype": 1,
-      "autoupdate": true,
-      "autoupdate_config": true,
-      "autoupdate_asset": true,
       "keep_run": true,
       "entry": "manager_test",
       "args_after": "",
       "args_before": null,
-      "use_ipc": false,
-      "configs": [],
-      "asset_id": null,
-      "asset_name": null,
-      "max_run_time": 30,
-      "max_stopping_time": 300
+      "is_indicate": false,
+      "ptype": {
+        "Custom": {
+          "autoupdate": true,
+          "config_autoupdate": true,
+          "asset_autoupdate": true,
+          "use_ipc": false,
+          "log_level": 0,
+          "configs": [
+            [
+              2,
+              "config/config.json"
+            ]
+          ]
+        }
+      }
     },
     {
       "id": 2,
       "name": "manager_test_ipc",
-      "ptype": 1,
-      "autoupdate": true,
-      "autoupdate_config": true,
-      "autoupdate_asset": true,
       "keep_run": true,
       "entry": "manager_ipc",
       "args_after": null,
       "args_before": null,
-      "use_ipc": true,
-      "configs": [],
-      "asset_id": null,
-      "asset_name": null,
-      "max_run_time": 30,
-      "max_stopping_time": 300
+      "is_indicate": false,
+      "ptype": {
+        "Custom": {
+          "autoupdate": true,
+          "config_autoupdate": true,
+          "asset_autoupdate": true,
+          "use_ipc": true,
+          "log_level": 0,
+          "configs": [
+            [
+              3,
+              "config/config.json"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "name": "qalc",
+      "keep_run": false,
+      "entry": "qalc",
+      "args_after": null,
+      "args_before": null,
+      "is_indicate": false,
+      "ptype": "Builtin"
     }
   ]
 }
