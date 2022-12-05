@@ -10,8 +10,7 @@ pub enum Startup {
 	InitIpcManager,
 	InitExecManager,
 	InitProgramUpdater,
-	InitStreamer,
-	InitAdminCli
+	InitStreamer
 }
 
 #[derive(StageLabel)]

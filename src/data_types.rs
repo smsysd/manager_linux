@@ -137,7 +137,6 @@ pub mod data_server {
 		pub autoupdate: bool,
 		pub config_autoupdate: bool,
 		pub asset_autoupdate: bool,
-		pub use_ipc: bool,
 		pub log_level: i16,
 		pub configs: Vec<(i32, String)>
 	}
@@ -167,6 +166,12 @@ pub mod data_server {
 			}
 		}
 	}
+
+	#[derive(Serialize, Deserialize, Clone, Debug)]
+	pub enum IpcType {
+		Msgpack,
+		Json
+	}
 	
 	#[derive(Serialize, Deserialize, Clone)]
 	pub struct Program {
@@ -177,6 +182,7 @@ pub mod data_server {
 		pub args_after: Option<String>,
 		pub args_before: Option<String>,
 		pub is_indicate: bool,
+		pub ipc_type: Option<IpcType>,
 	
 		pub ptype: ProgramType
 	}

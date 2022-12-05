@@ -17,7 +17,6 @@ pub mod ipcm;
 pub mod execm;
 pub mod program_updater;
 pub mod streamer;
-pub mod admin_clim;
 
 use data_types::data_server::{Report, ReportType};
 
@@ -47,7 +46,6 @@ fn main() -> Result<(), Error> {
     schedule.add_stage(stages::Startup::InitExecManager, SystemStage::parallel().with_run_criteria(ShouldRun::once));
     schedule.add_stage(stages::Startup::InitProgramUpdater, SystemStage::parallel().with_run_criteria(ShouldRun::once));
     schedule.add_stage(stages::Startup::InitStreamer, SystemStage::parallel().with_run_criteria(ShouldRun::once));
-    schedule.add_stage(stages::Startup::InitAdminCli, SystemStage::parallel().with_run_criteria(ShouldRun::once));
     schedule.add_stage(stages::Core::PollServer, SystemStage::parallel());
     schedule.add_stage(stages::Core::HandlePollEvents, SystemStage::parallel());
     schedule.add_stage(stages::Core::Main, SystemStage::parallel());
@@ -62,7 +60,6 @@ fn main() -> Result<(), Error> {
     execm::init(&mut world, &mut schedule)?;
     program_updater::init(&mut world, &mut schedule)?;
     streamer::init(&mut world, &mut schedule)?;
-    admin_clim::init(&mut world, &mut schedule)?;
 
     loop {
         schedule.run(&mut world);

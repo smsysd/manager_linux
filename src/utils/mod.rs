@@ -29,6 +29,14 @@ where T: Deserialize<'a> {
 	}
 }
 
+pub fn json_decode<'a, T>(val: &'a [u8]) -> Result<T, Error>
+where T: Deserialize<'a> {
+	match serde_json::from_slice(val) {
+		Ok(val) => Ok(val),
+		Err(e) => Err(err(&e.to_string()))
+	}
+}
+
 pub fn count<T>(data: T) -> usize
 where T: IntoIterator {
     let mut cnt = 0;

@@ -11,7 +11,7 @@ use std::time::{Instant, Duration};
 use std::{io::Error, process, process::Child};
 use crate::configm::ConfigBase;
 use crate::data_types;
-use crate::data_types::data_server::ProgramType;
+use crate::data_types::data_server::{ProgramType, IpcType};
 use crate::data_types::data_server::Report;
 use crate::data_types::data_server::ReportType;
 use crate::sendm::SendManager;
@@ -32,7 +32,7 @@ pub struct Exec {
     pub pid: i32,
     pub keep_run: bool,
     pub name: String,
-    pub use_ipc: bool,
+    pub ipc_type: Option<IpcType>,
     pub entry: String,
     pub args_before: Option<String>,
     pub args_after: Option<String>,
@@ -117,28 +117,31 @@ fn terminate_cleaner(mut cmd: Commands, mut execs: Query<(Entity, &Exec, &mut Te
 
 fn terminator(mut execs: Query<(&Exec, &mut Terminate), With<Run>>, ipc: Res<Ipc>) {
     for (ex, mut t) in &mut execs {
-        if ex.use_ipc {
-            let req_allow = match &t.tl_req {
-                Some(val) => val.elapsed() >= TERMINATE_REQ_REPEAT_PERIOD,
-                None => true
-            };
-            if req_allow {
-                match ipc.terminate(&ex.name, t.hard) {
-                    Err(e) => println!("[EXECM] fail to send terminate req for program {}: {:?}", ex.name, e),
-                    Ok(()) => {
-                        // println!("[EXECM] {} terminate request sended to program {}", if t.hard {"hard"} else {"soft"}, ex.name);
+        match &ex.ipc_type {
+            Some(ipc_type) => {
+                let req_allow = match &t.tl_req {
+                    Some(val) => val.elapsed() >= TERMINATE_REQ_REPEAT_PERIOD,
+                    None => true
+                };
+                if req_allow {
+                    match ipc.terminate(&ex.name, t.hard, ipc_type) {
+                        Err(e) => println!("[EXECM] fail to send terminate req for program {}: {:?}", ex.name, e),
+                        Ok(()) => {
+                            // println!("[EXECM] {} terminate request sended to program {}", if t.hard {"hard"} else {"soft"}, ex.name);
+                        }
                     }
+                    t.tl_req = Some(Instant::now());
                 }
-                t.tl_req = Some(Instant::now());
-            }
-        } else {
-            let req_allow = match &t.tl_req {
-                Some(val) => val.elapsed() >= TERMINATE_CHECK_PERIOD,
-                None => true
-            };
-            if req_allow {
-                mos::pkill(&ex.name);
-                t.tl_req = Some(Instant::now());
+            },
+            None => {
+                let req_allow = match &t.tl_req {
+                    Some(val) => val.elapsed() >= TERMINATE_CHECK_PERIOD,
+                    None => true
+                };
+                if req_allow {
+                    mos::pkill(&ex.name);
+                    t.tl_req = Some(Instant::now());
+                }
             }
         }
     }
@@ -202,10 +205,7 @@ fn startup(mut cmd: Commands, config: Res<PointConfig>) {
             pid: p.id,
             name: p.name.clone(),
             keep_run: p.keep_run,
-            use_ipc: match &p.ptype {
-                ProgramType::Custom(pc) => pc.use_ipc,
-                ProgramType::Builtin => false
-            },
+            ipc_type: p.ipc_type.clone(),
             entry: p.entry.clone(),
             args_after: p.args_after.clone(),
             args_before: p.args_before.clone(),
